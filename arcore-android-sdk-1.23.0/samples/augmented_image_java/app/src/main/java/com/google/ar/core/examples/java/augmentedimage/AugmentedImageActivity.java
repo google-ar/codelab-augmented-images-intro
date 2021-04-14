@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google Inc. All Rights Reserved.
+ * Copyright 2018 Google LLC
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,12 +22,12 @@ import android.net.Uri;
 import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 import android.os.Bundle;
-import android.support.v7.app.AppCompatActivity;
 import android.util.Log;
 import android.util.Pair;
 import android.view.View;
 import android.widget.ImageView;
 import android.widget.Toast;
+import androidx.appcompat.app.AppCompatActivity;
 import com.bumptech.glide.Glide;
 import com.bumptech.glide.RequestManager;
 import com.google.ar.core.Anchor;
@@ -96,8 +96,6 @@ public class AugmentedImageActivity extends AppCompatActivity implements GLSurfa
   // the
   // database.
   private final Map<Integer, Pair<AugmentedImage, Anchor>> augmentedImageMap = new HashMap<>();
-
-  // Declare the PhysicsController class.
   private PhysicsController physicsController;
 
   @Override
@@ -122,6 +120,20 @@ public class AugmentedImageActivity extends AppCompatActivity implements GLSurfa
         .into(fitToScanView);
 
     installRequested = false;
+  }
+
+  @Override
+  protected void onDestroy() {
+    if (session != null) {
+      // Explicitly close ARCore Session to release native resources.
+      // Review the API reference for important considerations before calling close() in apps with
+      // more complicated lifecycle requirements:
+      // https://developers.google.com/ar/reference/java/arcore/reference/com/google/ar/core/Session#close()
+      session.close();
+      session = null;
+    }
+
+    super.onDestroy();
   }
 
   @Override
@@ -317,7 +329,7 @@ public class AugmentedImageActivity extends AppCompatActivity implements GLSurfa
           break;
 
         case TRACKING:
-          // Have to switch to UI Thread to update View.
+          // Switch to UI Thread to update View
           this.runOnUiThread(
               new Runnable() {
                 @Override
@@ -326,7 +338,7 @@ public class AugmentedImageActivity extends AppCompatActivity implements GLSurfa
                 }
               });
 
-          // Create a new anchor for newly found images.
+          // Create a new anchor for newly found images
           if (!augmentedImageMap.containsKey(augmentedImage.getIndex())) {
             Anchor centerPoseAnchor = augmentedImage.createAnchor(augmentedImage.getCenterPose());
             augmentedImageMap.put(
@@ -338,8 +350,8 @@ public class AugmentedImageActivity extends AppCompatActivity implements GLSurfa
             augmentedImageRenderer.updateAndyPose(ballPose);
 
 
-            // Use real world gravity, (0, -10, 0) as gravity
-            // Convert to Physics world coordinate (because Maze mesh has to be static)
+            // Use real world gravity, (0, -10, 0), as gravity
+            // Convert to Physics world coordinate(maze mesh has to be static)
             // Use it as a force to move the ball
             Pose worldGravityPose = Pose.makeTranslation(0, -10f, 0);
             Pose mazeGravityPose = augmentedImage.getCenterPose().inverse().compose(worldGravityPose);

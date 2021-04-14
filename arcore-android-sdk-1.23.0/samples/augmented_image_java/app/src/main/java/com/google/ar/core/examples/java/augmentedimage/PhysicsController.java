@@ -91,17 +91,12 @@ public class PhysicsController {
     AddMazeRigidBody();
     AddBallRigidBody();
 
-    previous_time = System.currentTimeMillis();
+    previous_time = java.lang.System.currentTimeMillis();
   }
 
   private void AddBallRigidBody() {
     // Read comments in AddMazeRigidBody to see why we choose 0.13 for Ball's radius
     CollisionShape ballShape = new SphereShape(0.13f);
-
-    float ballMass = 0.2f;
-    Vector3f ballLocalInertia = new Vector3f();
-    ballShape.calculateLocalInertia(ballMass, ballLocalInertia);
-
 
     Transform ballTransform = new Transform();
     ballTransform.setIdentity();
@@ -109,7 +104,7 @@ public class PhysicsController {
 
     DefaultMotionState ballMotionState = new DefaultMotionState(ballTransform);
     RigidBodyConstructionInfo ballRBInfo = new RigidBodyConstructionInfo(
-        ballMass, ballMotionState, ballShape, ballLocalInertia);
+        0.2f, ballMotionState, ballShape, new Vector3f(0, 0, 0));
 
     ballRB = new RigidBody(ballRBInfo);
     ballRB.setActivationState(DISABLE_DEACTIVATION);
@@ -266,13 +261,13 @@ public class PhysicsController {
 
 
   public void updatePhysics() {
-    long current_time = System.currentTimeMillis();
+    long current_time = java.lang.System.currentTimeMillis();
 
     // stepSimulation takes deltaTime in the unit of seconds
     dynamicsWorld.stepSimulation((current_time - previous_time) / 1000.0f);
     previous_time = current_time;
 
-    printDebugInfo();
+    //printDebugInfo();
   }
 
   private void printDebugInfo() {
@@ -313,9 +308,6 @@ public class PhysicsController {
     // Because in display size, Sceneform is actually dealing with original size of Maze
     float translation[] = {ballTransform.origin.x / MAZE_SCALE, ballTransform.origin.y / MAZE_SCALE, ballTransform.origin.z/ MAZE_SCALE};
     float rotation[] = {rot.x, rot.y, rot.z, rot.w};
-//    Log.d(TAG,
-//        String.format("ball rotation %f, %f, %f, %f",
-//            rot.x, rot.y, rot.z, rot.w));
 
     Pose ballPose = new Pose(translation, rotation);
     return ballPose;

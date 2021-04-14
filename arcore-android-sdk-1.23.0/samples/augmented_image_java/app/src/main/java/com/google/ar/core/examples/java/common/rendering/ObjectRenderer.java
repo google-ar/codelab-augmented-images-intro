@@ -1,5 +1,6 @@
 /*
- * Copyright 2018 Google Inc. All Rights Reserved.
+ * Copyright 2017 Google LLC
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -12,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.google.ar.core.examples.java.augmentedimage.rendering;
+package com.google.ar.core.examples.java.common.rendering;
 
 import android.content.Context;
 import android.graphics.Bitmap;
@@ -20,7 +21,6 @@ import android.graphics.BitmapFactory;
 import android.opengl.GLES20;
 import android.opengl.GLUtils;
 import android.opengl.Matrix;
-import com.google.ar.core.examples.java.common.rendering.ShaderUtil;
 import de.javagl.obj.Obj;
 import de.javagl.obj.ObjData;
 import de.javagl.obj.ObjReader;
@@ -32,6 +32,8 @@ import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
 import java.nio.ShortBuffer;
+import java.util.Map;
+import java.util.TreeMap;
 
 /** Renders an object loaded from an OBJ file in OpenGL. */
 public class ObjectRenderer {
@@ -43,20 +45,21 @@ public class ObjectRenderer {
    * @see #setBlendMode(BlendMode)
    */
   public enum BlendMode {
-    /** Multiplies the destination color by the source alpha. */
+    /** Multiplies the destination color by the source alpha, without z-buffer writing. */
     Shadow,
-    /** Normal alpha blending. */
-    SourceAlpha
+    /** Normal alpha blending with z-buffer writing. */
+    AlphaBlending
   }
 
+  // Shader names.
+  private static final String VERTEX_SHADER_NAME = "shaders/ar_object.vert";
+  private static final String FRAGMENT_SHADER_NAME = "shaders/ar_object.frag";
+
   private static final int COORDS_PER_VERTEX = 3;
+  private static final float[] DEFAULT_COLOR = new float[] {0f, 0f, 0f, 0f};
 
   // Note: the last component must be zero to avoid applying the translational part of the matrix.
   private static final float[] LIGHT_DIRECTION = new float[] {0.250f, 0.866f, 0.433f, 0.0f};
-
-  // No tint color
-  private static final float[] ZERO_COLOR_TINT = {0.0f, 0.0f, 0.0f, 0.0f}; // No tinting by default
-
   private final float[] viewLightDirection = new float[4];
 
   // Object vertex buffer variables.
@@ -88,11 +91,20 @@ public class ObjectRenderer {
   // Shader location: material properties.
   private int materialParametersUniform;
 
-  // Shader location: color correction property
+  // Shader location: color correction property.
   private int colorCorrectionParameterUniform;
 
-  // Shader location: color tinting
-  private int colorTintParameterUniform;
+  // Shader location: object color property (to change the primary color of the object).
+  private int colorUniform;
+
+  // Shader location: depth texture.
+  private int depthTextureUniform;
+
+  // Shader location: transform to depth uvs.
+  private int depthUvTransformUniform;
+
+  // Shader location: the aspect ratio of the depth texture.
+  private int depthAspectRatioUniform;
 
   private BlendMode blendMode = null;
 
@@ -107,7 +119,12 @@ public class ObjectRenderer {
   private float specular = 1.0f;
   private float specularPower = 6.0f;
 
-  public ObjectRenderer() {}
+  // Depth-for-Occlusion parameters.
+  private static final String USE_DEPTH_FOR_OCCLUSION_SHADER_FLAG = "USE_DEPTH_FOR_OCCLUSION";
+  private boolean useDepthForOcclusion = false;
+  private float depthAspectRatio = 0.0f;
+  private float[] uvTransform = null;
+  private int depthTextureId;
 
   /**
    * Creates and initializes OpenGL resources needed for rendering the model.
@@ -118,6 +135,9 @@ public class ObjectRenderer {
    */
   public void createOnGlThread(Context context, String objAssetName, String diffuseTextureAssetName)
       throws IOException {
+    // Compiles and loads the shader based on the current configuration.
+    compileAndLoadShaderProgram(context);
+
     // Read the texture.
     Bitmap textureBitmap =
         BitmapFactory.decodeStream(context.getAssets().open(diffuseTextureAssetName));
@@ -198,10 +218,52 @@ public class ObjectRenderer {
 
     ShaderUtil.checkGLError(TAG, "OBJ buffer load");
 
+    Matrix.setIdentityM(modelMatrix, 0);
+  }
+
+  /**
+   * Selects the blending mode for rendering.
+   *
+   * @param blendMode The blending mode. Null indicates no blending (opaque rendering).
+   */
+  public void setBlendMode(BlendMode blendMode) {
+    this.blendMode = blendMode;
+  }
+
+  /**
+   * Specifies whether to use the depth texture to perform depth-based occlusion of virtual objects
+   * from real-world geometry.
+   *
+   * <p>This function is a no-op if the value provided is the same as what is already set. If the
+   * value changes, this function will recompile and reload the shader program to either
+   * enable/disable depth-based occlusion. NOTE: recompilation of the shader is inefficient. This
+   * code could be optimized to precompile both versions of the shader.
+   *
+   * @param context Context for loading the shader.
+   * @param useDepthForOcclusion Specifies whether to use the depth texture to perform occlusion
+   *     during rendering of virtual objects.
+   */
+  public void setUseDepthForOcclusion(Context context, boolean useDepthForOcclusion)
+      throws IOException {
+    if (this.useDepthForOcclusion == useDepthForOcclusion) {
+      return; // No change, does nothing.
+    }
+
+    // Toggles the occlusion rendering mode and recompiles the shader.
+    this.useDepthForOcclusion = useDepthForOcclusion;
+    compileAndLoadShaderProgram(context);
+  }
+
+  private void compileAndLoadShaderProgram(Context context) throws IOException {
+    // Compiles and loads the shader program based on the selected mode.
+    Map<String, Integer> defineValuesMap = new TreeMap<>();
+    defineValuesMap.put(USE_DEPTH_FOR_OCCLUSION_SHADER_FLAG, useDepthForOcclusion ? 1 : 0);
+
     final int vertexShader =
-        ShaderUtil.loadGLShader(TAG, context, GLES20.GL_VERTEX_SHADER, "shaders/object.vert");
+        ShaderUtil.loadGLShader(TAG, context, GLES20.GL_VERTEX_SHADER, VERTEX_SHADER_NAME);
     final int fragmentShader =
-        ShaderUtil.loadGLShader(TAG, context, GLES20.GL_FRAGMENT_SHADER, "shaders/object.frag");
+        ShaderUtil.loadGLShader(
+            TAG, context, GLES20.GL_FRAGMENT_SHADER, FRAGMENT_SHADER_NAME, defineValuesMap);
 
     program = GLES20.glCreateProgram();
     GLES20.glAttachShader(program, vertexShader);
@@ -224,20 +286,16 @@ public class ObjectRenderer {
     materialParametersUniform = GLES20.glGetUniformLocation(program, "u_MaterialParameters");
     colorCorrectionParameterUniform =
         GLES20.glGetUniformLocation(program, "u_ColorCorrectionParameters");
-    colorTintParameterUniform = GLES20.glGetUniformLocation(program, "u_ColorTintParameters");
+    colorUniform = GLES20.glGetUniformLocation(program, "u_ObjColor");
+
+    // Occlusion Uniforms.
+    if (useDepthForOcclusion) {
+      depthTextureUniform = GLES20.glGetUniformLocation(program, "u_DepthTexture");
+      depthUvTransformUniform = GLES20.glGetUniformLocation(program, "u_DepthUvTransform");
+      depthAspectRatioUniform = GLES20.glGetUniformLocation(program, "u_DepthAspectRatio");
+    }
 
     ShaderUtil.checkGLError(TAG, "Program parameters");
-
-    Matrix.setIdentityM(modelMatrix, 0);
-  }
-
-  /**
-   * Selects the blending mode for rendering.
-   *
-   * @param blendMode The blending mode. Null indicates no blending (opaque rendering).
-   */
-  public void setBlendMode(BlendMode blendMode) {
-    this.blendMode = blendMode;
   }
 
   /**
@@ -253,6 +311,15 @@ public class ObjectRenderer {
     scaleMatrix[0] = scaleFactor;
     scaleMatrix[5] = scaleFactor;
     scaleMatrix[10] = scaleFactor;
+    Matrix.multiplyMM(this.modelMatrix, 0, modelMatrix, 0, scaleMatrix, 0);
+  }
+
+  public void updateModelMatrix(float[] modelMatrix, float scaleFactorX, float scaleFactorY, float scaleFactorZ) {
+    float[] scaleMatrix = new float[16];
+    Matrix.setIdentityM(scaleMatrix, 0);
+    scaleMatrix[0] = scaleFactorX;
+    scaleMatrix[5] = scaleFactorY;
+    scaleMatrix[10] = scaleFactorZ;
     Matrix.multiplyMM(this.modelMatrix, 0, modelMatrix, 0, scaleMatrix, 0);
   }
 
@@ -278,18 +345,22 @@ public class ObjectRenderer {
    *
    * @param cameraView A 4x4 view matrix, in column-major order.
    * @param cameraPerspective A 4x4 projection matrix, in column-major order.
-   * @param lightIntensity Illumination intensity. Combined with diffuse and specular material
+   * @param colorCorrectionRgba Illumination intensity. Combined with diffuse and specular material
    *     properties.
    * @see #setBlendMode(BlendMode)
    * @see #updateModelMatrix(float[], float)
    * @see #setMaterialProperties(float, float, float, float)
    * @see android.opengl.Matrix
    */
+  public void draw(float[] cameraView, float[] cameraPerspective, float[] colorCorrectionRgba) {
+    draw(cameraView, cameraPerspective, colorCorrectionRgba, DEFAULT_COLOR);
+  }
+
   public void draw(
       float[] cameraView,
       float[] cameraPerspective,
       float[] colorCorrectionRgba,
-      float[] colorTintRgba) {
+      float[] objColor) {
 
     ShaderUtil.checkGLError(TAG, "Before draw");
 
@@ -309,20 +380,10 @@ public class ObjectRenderer {
         viewLightDirection[1],
         viewLightDirection[2],
         1.f);
+    GLES20.glUniform4fv(colorCorrectionParameterUniform, 1, colorCorrectionRgba, 0);
 
-    GLES20.glUniform4f(
-        colorCorrectionParameterUniform,
-        colorCorrectionRgba[0],
-        colorCorrectionRgba[1],
-        colorCorrectionRgba[2],
-        colorCorrectionRgba[3]);
-
-    GLES20.glUniform4f(
-        colorTintParameterUniform,
-        colorTintRgba[0],
-        colorTintRgba[1],
-        colorTintRgba[2],
-        colorTintRgba[3]);
+    // Set the object color property.
+    GLES20.glUniform4fv(colorUniform, 1, objColor, 0);
 
     // Set the object material properties.
     GLES20.glUniform4f(materialParametersUniform, ambient, diffuse, specular, specularPower);
@@ -331,6 +392,18 @@ public class ObjectRenderer {
     GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
     GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[0]);
     GLES20.glUniform1i(textureUniform, 0);
+
+    // Occlusion parameters.
+    if (useDepthForOcclusion) {
+      // Attach the depth texture.
+      GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+      GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, depthTextureId);
+      GLES20.glUniform1i(depthTextureUniform, 1);
+
+      // Set the depth texture uv transform.
+      GLES20.glUniformMatrix3fv(depthUvTransformUniform, 1, false, uvTransform, 0);
+      GLES20.glUniform1f(depthAspectRatioUniform, depthAspectRatio);
+    }
 
     // Set the vertex attributes.
     GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vertexBufferId);
@@ -353,16 +426,21 @@ public class ObjectRenderer {
     GLES20.glEnableVertexAttribArray(texCoordAttribute);
 
     if (blendMode != null) {
-      GLES20.glDepthMask(false);
       GLES20.glEnable(GLES20.GL_BLEND);
       switch (blendMode) {
         case Shadow:
           // Multiplicative blending function for Shadow.
+          GLES20.glDepthMask(false);
           GLES20.glBlendFunc(GLES20.GL_ZERO, GLES20.GL_ONE_MINUS_SRC_ALPHA);
           break;
-        case SourceAlpha:
-          // SourceAlpha, additive blending function.
-          GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        case AlphaBlending:
+          // Alpha blending function, with the depth mask enabled.
+          GLES20.glDepthMask(true);
+
+          // Textures are loaded with premultiplied alpha
+          // (https://developer.android.com/reference/android/graphics/BitmapFactory.Options#inPremultiplied),
+          // so we use the premultiplied alpha blend factors.
+          GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA);
           break;
       }
     }
@@ -386,11 +464,6 @@ public class ObjectRenderer {
     ShaderUtil.checkGLError(TAG, "After draw");
   }
 
-  // Overload to provide default tint color {0, 0, 0, 0}, as if no tint is applied.
-  public void draw(float[] cameraView, float[] cameraPerspective, float[] colorCorrectionRgba) {
-    draw(cameraView, cameraPerspective, colorCorrectionRgba, ZERO_COLOR_TINT);
-  }
-
   private static void normalizeVec3(float[] v) {
     float reciprocalLength = 1.0f / (float) Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
     v[0] *= reciprocalLength;
@@ -398,13 +471,12 @@ public class ObjectRenderer {
     v[2] *= reciprocalLength;
   }
 
-  public void updateModelMatrix(float[] modelMatrix, float scaleFactorX, float scaleFactorY, float scaleFactorZ) {
-    float[] scaleMatrix = new float[16];
-    Matrix.setIdentityM(scaleMatrix, 0);
-    scaleMatrix[0] = scaleFactorX;
-    scaleMatrix[5] = scaleFactorY;
-    scaleMatrix[10] = scaleFactorZ;
-    Matrix.multiplyMM(this.modelMatrix, 0, modelMatrix, 0, scaleMatrix, 0);
+  public void setUvTransformMatrix(float[] transform) {
+    uvTransform = transform;
   }
 
+  public void setDepthTexture(int textureId, int width, int height) {
+    depthTextureId = textureId;
+    depthAspectRatio = (float) width / (float) height;
+  }
 }
